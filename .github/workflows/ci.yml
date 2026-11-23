@@ -1,0 +1,99 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  # A local go.work may point brpay at a sibling checkout; CI always
+  # resolves the published module.
+  GOWORK: "off"
+
+jobs:
+  test:
+    name: test (go ${{ matrix.go }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        go: ["1.22.x", "stable"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ matrix.go }}
+          cache-dependency-path: go.mod
+
+      - name: Resolve modules
+        run: |
+          go mod tidy
+          go mod download
+          go mod verify
+
+      - name: gofmt
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "Files need gofmt:"; echo "$unformatted"; exit 1
+          fi
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: go test -race (includes the conformance suite against mockpsp over mTLS)
+        run: go test -race -coverprofile=coverage.out -coverpkg=./... ./...
+
+      - name: Coverage >= 85%
+        run: |
+          go tool cover -func=coverage.out | tail -1
+          go tool cover -func=coverage.out | awk '/^total:/ { sub("%","",$3); if ($3+0 < 85) { print "coverage below 85%"; exit 1 } }'
+
+  fuzz:
+    name: fuzz ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    needs: test
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [FuzzParseAmount, FuzzValidateTxID]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+          cache-dependency-path: go.mod
+      - run: go mod tidy
+      - name: fuzz smoke
+        run: go test ./pixapi -run '^$' -fuzz '^${{ matrix.target }}$' -fuzztime 15s -fuzzminimizetime 1s
+
+  docker:
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.mod
+
+      - name: Generate go.sum
+        run: go mod tidy
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build image
+        run: docker build --build-arg VERSION=${{ github.sha }} -t pix-cobranca-mockpsp:ci .
+
+      - name: Smoke test
+        run: |
+          docker run -d --name mockpsp -p 8443:8443 pix-cobranca-mockpsp:ci
+          for i in $(seq 1 30); do docker exec mockpsp /mockpsp healthcheck && break; sleep 1; done
+          docker exec mockpsp /mockpsp healthcheck
+          docker logs mockpsp
+          docker rm -f mockpsp

@@ -1,0 +1,20 @@
+# Local workspace resolving brpay from a sibling checkout.
+go.work
+go.work.sum
+
+# Development PKI written by `mockpsp certs`. Never commit private keys.
+certs/
+
+# Build and test output
+/bin/
+/dist/
+*.exe
+*.test
+coverage.out
+coverage.html
+*.cov
+
+# Editors and OS
+.idea/
+.vscode/
+.DS_Store
